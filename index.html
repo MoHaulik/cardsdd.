@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>WebXR AR Card Menu</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <style>
+    body { 
+      margin: 0; 
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    #overlay {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 1;
+    }
+    #start-button {
+      padding: 12px 24px;
+      font-size: 18px;
+      background: rgba(72, 118, 255, 0.8);
+      color: white;
+      border: none;
+      border-radius: 30px;
+      box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+      cursor: pointer;
+      transition: all 0.3s ease;
+    }
+    #start-button:hover {
+      background: rgba(72, 118, 255, 1);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+    }
+    #status {
+      margin-top: 15px;
+      font-size: 16px;
+      background: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 10px 15px;
+      border-radius: 12px;
+      display: none;
+      backdrop-filter: blur(5px);
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <button id="start-button">Start AR Card Menu</button>
+    <div id="status"></div>
+  </div>
+  
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.150.1/build/three.module.js';
+    import { ARButton } from 'https://unpkg.com/three@0.150.1/examples/jsm/webxr/ARButton.js';
+
+    let camera, scene, renderer;
+    let controller;
+    let cards = [];
+    let cardTextures = [];
+    let hoveredCard = null;
+    let clock = new THREE.Clock();
+    let font;
+    
+    // Card content data
+    const cardData = [
+      {
+        title: "Explore",
+        description: "Discover new worlds",
+        color: 0x4876FF,
+        pattern: "wavy"
+      },
+      {
+        title: "Create",
+        description: "Build your ideas",
+        color: 0xFF4500,
+        pattern: "dotted"
+      },
+      {
+        title: "Learn",
+        description: "Expand your mind",
+        color: 0x00C957,
+        pattern: "linear"
+      },
+      {
+        title: "Connect",
+        description: "Share with others",
+        color: 0xE066FF,
+        pattern: "circular"
+      }
+    ];
+    
+    // Magic particles system
+    let particleSystems = [];
+    
+    init();
+
+    function init() {
+      // Scene setup
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      // Renderer setup
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0x404040, 2);
+      scene.add(ambientLight);
+
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      directionalLight.position.set(1, 1, 1);
+      directionalLight.castShadow = true;
+      scene.add(directionalLight);
+
+      // Start button event
+      document.getElementById('start-button').addEventListener('click', () => {
+        if (navigator.xr) {
+          navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+            if (supported) {
+              const sessionInit = { 
+                requiredFeatures: ['hit-test'],
+                optionalFeatures: ['dom-overlay'], 
+                domOverlay: { root: document.body } 
+              };
+              navigator.xr.requestSession('immersive-ar', sessionInit).then(onSessionStarted);
+              
+              updateStatus('Starting AR session...');
+            } else {
+              updateStatus('WebXR AR session is not supported on this device.');
+            }
+          });
+        } else {
+          updateStatus('WebXR is not supported in this browser.');
+        }
+      });
+
+      // Handle window resize
+      window.addEventListener('resize', onWindowResize);
+    }
+
+    function updateStatus(message) {
+      const statusElement = document.getElementById('status');
+      statusElement.style.display = 'block';
+      statusElement.textContent = message;
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function onSessionStarted(session) {
+      renderer.xr.setReferenceSpaceType('local');
+      renderer.xr.setSession(session);
+      
+      document.getElementById('start-button').style.display = 'none';
+      updateStatus('AR card menu initializing...');
+
+      createProceduralTextures();
+      createCards();
+      setupController(session);
+
+      renderer.setAnimationLoop(render);
+      session.addEventListener('end', onSessionEnd);
+    }
+
+    function onSessionEnd() {
+      updateStatus('AR session ended');
+      document.getElementById('start-button').style.display = 'block';
+    }
+
+    function createProceduralTextures() {
+      cardData.forEach((data, index) => {
+        const textureSize = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = textureSize;
+        canvas.height = textureSize;
+        const ctx = canvas.getContext('2d');
+        
+        // Create gradient background
+        const gradient = ctx.createLinearGradient(0, 0, textureSize, textureSize);
+        const color = new THREE.Color(data.color);
+        const r = Math.floor(color.r * 255);
+        const g = Math.floor(color.g * 255);
+        const b = Math.floor(color.b * 255);
+        
+        gradient.addColorStop(0, `rgb(${r}, ${g}, ${b})`);
+        gradient.addColorStop(1, `rgb(${Math.floor(r*0.7)}, ${Math.floor(g*0.7)}, ${Math.floor(b*0.7)})`);
+        
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, textureSize, textureSize);
+        
+        // Add subtle pattern based on card type
+        ctx.strokeStyle = `rgba(255, 255, 255, 0.3)`;
+        ctx.lineWidth = 2;
+        
+        if (data.pattern === "wavy") {
+          ctx.beginPath();
+          for (let i = 0; i < textureSize; i += 20) {
+            for (let j = 0; j < textureSize; j += 5) {
+              const amplitude = 8;
+              const x = i + Math.sin(j * 0.1) * amplitude;
+              ctx.lineTo(x, j);
+            }
+            ctx.stroke();
+            ctx.beginPath();
+          }
+        } else if (data.pattern === "dotted") {
+          for (let i = 20; i < textureSize; i += 25) {
+            for (let j = 20; j < textureSize; j += 25) {
+              ctx.beginPath();
+              ctx.arc(i, j, 2, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+        } else if (data.pattern === "linear") {
+          for (let i = 20; i < textureSize; i += 30) {
+            ctx.beginPath();
+            ctx.moveTo(0, i);
+            ctx.lineTo(textureSize, i);
+            ctx.stroke();
+          }
+        } else if (data.pattern === "circular") {
+          const centerX = textureSize / 2;
+          const centerY = textureSize / 2;
+          for (let r = 20; r < textureSize/1.5; r += 20) {
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, r, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+        
+        // Create texture from canvas
+        const texture = new THREE.CanvasTexture(canvas);
+        cardTextures[index] = texture;
+      });
+      
+      console.log("Textures created successfully");
+    }
+
+    function createCards() {
+      const cardWidth = 0.2;
+      const cardHeight = 0.3;
+      const cardDepth = 0.02;
+      
+      for(let i = 0; i < cardData.length; i++) {
+        // Card geometry
+        const geometry = new THREE.BoxGeometry(cardWidth, cardHeight, cardDepth);
+        
+        // Card material with procedural texture
+        const material = new THREE.MeshStandardMaterial({
+          map: cardTextures[i],
+          color: cardData[i].color,
+          metalness: 0.3,
+          roughness: 0.6,
+          emissive: new THREE.Color(cardData[i].color),
+          emissiveIntensity: 0.1,
+        });
+        
+        // Create card mesh
+        const card = new THREE.Mesh(geometry, material);
+        
+        const angle = (i - (cardData.length - 1) / 2) * 0.45;
+        const radius = 0.85;
+        card.position.x = Math.sin(angle) * radius;
+        card.position.y = 0;
+        card.position.z = -Math.cos(angle) * radius - 0.3;
+        
+        // Initially face the camera
+        card.lookAt(0, 0, 0);
+        
+        // Store original properties for animations
+        card.userData = {
+          originalPosition: card.position.clone(),
+          originalRotation: card.rotation.clone(),
+          originalScale: card.scale.clone(),
+          index: i,
+          hovered: false,
+          hoverAnimationProgress: 0,
+          orbitAngle: Math.random() * Math.PI * 2
+        };
+        
+        // Add a glow effect outline (initially invisible)
+        const glowMaterial = new THREE.MeshBasicMaterial({
+          color: cardData[i].color,
+          side: THREE.BackSide,
+          transparent: true,
+          opacity: 0
+        });
+        
+        const glowMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(cardWidth + 0.02, cardHeight + 0.02, cardDepth + 0.02),
+          glowMaterial
+        );
+        card.add(glowMesh);
+        card.userData.glowMesh = glowMesh;
+        
+        // Add to scene and cards array
+        scene.add(card);
+        cards.push(card);
+        
+        // Create particle system for this card (initially invisible)
+        createParticleSystem(card, cardData[i].color);
+      }
+      
+      updateStatus('Move your controller near a card to interact');
+    }
+    
+    function createParticleSystem(card, color) {
+      const particleCount = 30;
+      const particleGeometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(particleCount * 3);
+      
+      for (let i = 0; i < particleCount * 3; i += 3) {
+        positions[i] = (Math.random() - 0.5) * 0.3;
+        positions[i + 1] = (Math.random() - 0.5) * 0.3;
+        positions[i + 2] = (Math.random() - 0.5) * 0.3;
+      }
+      
+      particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      
+      const particleMaterial = new THREE.PointsMaterial({
+        color: new THREE.Color(color),
+        size: 0.01,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending
+      });
+      
+      const particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+      card.add(particleSystem);
+      
+      // Store original positions for animation
+      const originalPositions = [];
+      for (let i = 0; i < particleCount * 3; i += 3) {
+        originalPositions.push(new THREE.Vector3(
+          positions[i],
+          positions[i + 1],
+          positions[i + 2]
+        ));
+      }
+      
+      particleSystems.push({
+        system: particleSystem,
+        originalPositions,
+        active: false
+      });
+      
+      return particleSystem;
+    }
+
+    function setupController(session) {
+      // Create controller
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('connected', (event) => {
+        const xrInputSource = event.data;
+        updateStatus(`Controller connected: ${xrInputSource.handedness}`);
+      });
+      
+      scene.add(controller);
+      
+      // Create invisible controller model
+      const controllerGeometry = new THREE.CylinderGeometry(0.01, 0.02, 0.08, 16);
+      const controllerMaterial = new THREE.MeshStandardMaterial({
+        color: 0xFFFFFF,
+        roughness: 0.3,
+        metalness: 0.5,
+        transparent: true,
+        opacity: 0
+      });
+      const controllerMesh = new THREE.Mesh(controllerGeometry, controllerMaterial);
+      controllerMesh.rotation.x = Math.PI / 2;
+      controller.add(controllerMesh);
+      
+      // Make ray pointer invisible but keep functionality
+      const rayGeometry = new THREE.CylinderGeometry(0.002, 0.002, 2, 8);
+      rayGeometry.translate(0, -1, 0);
+      rayGeometry.rotateX(Math.PI / 2);
+      
+      const rayMaterial = new THREE.MeshBasicMaterial({
+        color: 0x00ffff,
+        transparent: true,
+        opacity: 0
+      });
+      
+      const rayMesh = new THREE.Mesh(rayGeometry, rayMaterial);
+      controller.add(rayMesh);
+      
+      // Add controller select event for card activation
+      controller.addEventListener('select', onControllerSelect);
+    }
+    
+    function onControllerSelect() {
+      // Get current hovered card
+      let hoveredCard = null;
+      cards.forEach(card => {
+        if (card.userData.hovered) {
+          hoveredCard = card;
+        }
+      });
+      
+      // If a card is hovered, trigger its action
+      if (hoveredCard) {
+        // Visual feedback for selection - create a burst of particles
+        const burstParticles = createBurstParticles(hoveredCard);
+        scene.add(burstParticles);
+        
+        // Animate the burst
+        setTimeout(() => {
+          scene.remove(burstParticles);
+        }, 1000);
+        
+        // Display card info
+        updateStatus(`Selected: ${cardData[hoveredCard.userData.index].title} - ${cardData[hoveredCard.userData.index].description}`);
+      }
+    }
+    
+    function createBurstParticles(card) {
+      const particleCount = 50;
+      const particleGeometry = new THREE.BufferGeometry();
+      const positions = new Float32Array(particleCount * 3);
+      const colors = new Float32Array(particleCount * 3);
+      const sizes = new Float32Array(particleCount);
+      
+      const cardColor = new THREE.Color(cardData[card.userData.index].color);
+      
+      for (let i = 0; i < particleCount; i++) {
+        const i3 = i * 3;
+        positions[i3] = 0;
+        positions[i3 + 1] = 0;
+        positions[i3 + 2] = 0;
+        
+        colors[i3] = cardColor.r;
+        colors[i3 + 1] = cardColor.g;
+        colors[i3 + 2] = cardColor.b;
+        
+        sizes[i] = Math.random() * 0.03 + 0.01;
+      }
+      
+      particleGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      particleGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      particleGeometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+      
+      const particleMaterial = new THREE.PointsMaterial({
+        size: 0.02,
+        vertexColors: true,
+        transparent: true,
+        blending: THREE.AdditiveBlending
+      });
+      
+      const particles = new THREE.Points(particleGeometry, particleMaterial);
+      
+      // Position at the card and set velocities
+      particles.position.copy(card.position);
+      
+      // Add velocity data for animation
+      const velocities = [];
+      for (let i = 0; i < particleCount; i++) {
+        velocities.push(new THREE.Vector3(
+          (Math.random() - 0.5) * 0.05,
+          (Math.random() - 0.5) * 0.05,
+          (Math.random() - 0.5) * 0.05
+        ));
+      }
+      
+      particles.userData = {
+        velocities,
+        animation: 0
+      };
+      
+      // Set up animation
+      function animateBurst() {
+        if (particles.userData.animation >= 1) {
+          return;
+        }
+        
+        particles.userData.animation += 0.02;
+        
+        const positions = particles.geometry.attributes.position.array;
+        for (let i = 0; i < particleCount; i++) {
+          const i3 = i * 3;
+          const velocity = particles.userData.velocities[i];
+          
+          positions[i3] += velocity.x;
+          positions[i3 + 1] += velocity.y;
+          positions[i3 + 2] += velocity.z;
+          
+          // Add gravity effect
+          particles.userData.velocities[i].y -= 0.0005;
+        }
+        
+        particles.geometry.attributes.position.needsUpdate = true;
+        particleMaterial.opacity = 1 - particles.userData.animation;
+        
+        requestAnimationFrame(animateBurst);
+      }
+      
+      animateBurst();
+      
+      return particles;
+    }
+
+    function render(timestamp, frame) {
+      if (frame) {
+        const referenceSpace = renderer.xr.getReferenceSpace();
+        const session = renderer.xr.getSession();
+        
+        // Get controller's world position
+        const controllerWorldPosition = new THREE.Vector3();
+        controller.getWorldPosition(controllerWorldPosition);
+        
+        // Get controller's forward direction
+        const controllerDirection = new THREE.Vector3(0, 0, -1);
+        controllerDirection.applyQuaternion(controller.quaternion);
+        
+        // Create raycaster from controller position and direction
+        const raycaster = new THREE.Raycaster(controllerWorldPosition, controllerDirection, 0.1, 5.0);
+        const intersects = raycaster.intersectObjects(cards);
+        
+        // Reset all previously hovered cards
+        cards.forEach(card => {
+          if (card.userData.hovered && !intersects.find(intersect => intersect.object === card)) {
+            animateCardToNormal(card);
+          }
+        });
+        
+        // Find closest card
+        let closestCard = null;
+        let closestDistance = 0.5;
+        
+        // First check for ray intersections (pointing at card)
+        if (intersects.length > 0) {
+          closestCard = intersects[0].object;
+        } 
+        // If not pointing directly at any card, check proximity as a fallback
+        else {
+          cards.forEach(card => {
+            const distance = controllerWorldPosition.distanceTo(card.position);
+            if (distance < closestDistance) {
+              closestCard = card;
+              closestDistance = distance;
+            }
+          });
+        }
+        
+        // Apply hover effect to the selected card
+        if (closestCard) {
+          // Get camera position to make card face camera
+          const cameraWorldPosition = new THREE.Vector3();
+          if (renderer.xr.isPresenting) {
+            const xrCamera = renderer.xr.getCamera(camera);
+            xrCamera.getWorldPosition(cameraWorldPosition);
+          } else {
+            camera.getWorldPosition(cameraWorldPosition);
+          }
+          
+          animateCardToHovered(closestCard, cameraWorldPosition);
+        }
+        
+        // Update animations
+        const time = clock.getElapsedTime();
+        updateCardAnimations(time);
+      }
+      
+      renderer.render(scene, camera);
+    }
+    
+    function updateCardAnimations(time) {
+      cards.forEach((card, index) => {
+        if (!card.userData.hovered) {
+          // Gentle floating animation for non-hovered cards
+          card.position.y = card.userData.originalPosition.y + Math.sin(time * 0.5 + index) * 0.01;
+          card.rotation.y = card.userData.originalRotation.y + Math.sin(time * 0.3 + index) * 0.05;
+          
+          // Ensure particles and glow are inactive
+          if (particleSystems[index]) {
+            particleSystems[index].system.material.opacity = 0;
+            particleSystems[index].active = false;
+          }
+          if (card.userData.glowMesh) {
+            card.userData.glowMesh.material.opacity = 0;
+          }
+        } else {
+          // Update magic particles for hovered cards
+          if (particleSystems[index]) {
+            particleSystems[index].active = true;
+            particleSystems[index].system.material.opacity = 0.8;
+            
+            // Animate particles in orbit pattern
+            const positions = particleSystems[index].system.geometry.attributes.position.array;
+            const originalPositions = particleSystems[index].originalPositions;
+            
+            for (let i = 0; i < originalPositions.length; i++) {
+              const i3 = i * 3;
+              // Calculate orbit position
+              card.userData.orbitAngle += 0.01;
+              
+              const radius = 0.1 + Math.sin(time * 0.5 + i * 0.2) * 0.05;
+              const orbitSpeed = 0.8 + Math.sin(i * 0.3) * 0.4;
+              const verticalFactor = Math.sin(time * 0.3 + i * 0.1) * 0.1;
+              
+              positions[i3] = originalPositions[i].x + Math.sin(time * orbitSpeed + i) * radius;
+              positions[i3 + 1] = originalPositions[i].y + verticalFactor + Math.sin(time * 0.7 + i * 0.5) * 0.05;
+              positions[i3 + 2] = originalPositions[i].z + Math.cos(time * orbitSpeed + i) * radius;
+            }
+            
+            particleSystems[index].system.geometry.attributes.position.needsUpdate = true;
+          }
+          
+          // Pulsing glow effect
+          if (card.userData.glowMesh) {
+            card.userData.glowMesh.material.opacity = 0.5 + Math.sin(time * 3) * 0.2;
+            // Make glow pulse with size too
+            const pulse = 1 + Math.sin(time * 3) * 0.08;
+            card.userData.glowMesh.scale.set(pulse, pulse, pulse);
+          }
+        }
+      });
+    }
+    
+    function animateCardToHovered(card, cameraPosition) {
+      // Mark as hovered
+      card.userData.hovered = true;
+      
+      // Enhanced scale up animation
+      card.scale.set(1.3, 1.3, 1.3);
+      
+      // Move card toward the user with a magical lift
+      const direction = new THREE.Vector3().subVectors(
+        new THREE.Vector3(0, 0, 0), 
+        card.userData.originalPosition
+      ).normalize().multiplyScalar(0.15);
+      
+      // Add a vertical lift component
+      direction.y += 0.1;
+      
+      card.position.copy(card.userData.originalPosition).add(direction);
+      
+      // Make card face toward camera
+      card.lookAt(cameraPosition);
+      
+      // Add slight wobble for magical effect
+      const time = clock.getElapsedTime();
+      card.rotation.z = Math.sin(time * 3) * 0.05;
+      
+      // Enhanced glow effect
+      card.material.emissive.setHex(cardData[card.userData.index].color);
+      card.material.emissiveIntensity = 0.6 + Math.sin(time * 3) * 0.2;
+    }
+    
+    function animateCardToNormal(card) {
+      card.userData.hovered = false;
+      
+      // Reset scale with slight bounce effect
+      card.scale.copy(card.userData.originalScale);
+      
+      // Reset position with gentle easing
+      card.position.copy(card.userData.originalPosition);
+      
+      // Reset rotation
+      card.rotation.copy(card.userData.originalRotation);
+      
+      // Reset material glow
+      card.material.emissiveIntensity = 0.1;
+    }
+  </script>
+</body>
+</html>
